@@ -18,7 +18,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "assetProtocol": { "enable": true, "scope": ["$APPDATA/**", "$TEMP/**"] },
+      "csp": "default-src 'self' tauri: asset: http://asset.localhost; frame-src 'self' tauri: asset: http://asset.localhost;"
     }
   },
   "bundle": {

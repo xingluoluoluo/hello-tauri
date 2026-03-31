@@ -7,6 +7,18 @@
     "core:default",
     "opener:default",
     "core:window:allow-create",
-    "core:webview:allow-create-webview-window"
+    "core:webview:allow-create-webview-window",
+    "fs:allow-exists",         
+    "fs:allow-mkdir",            
+    "fs:allow-write-file",     
+    "fs:allow-remove",        
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$APPDATA/**",
+        "$TEMP/**",
+        "$APPLOCALDATA/**"
+      ]
+    }
   ]
 }

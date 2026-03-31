@@ -1,178 +1,113 @@
-<!-- <script setup lang="ts">
-import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-
-const greetMsg = ref("");
-const name = ref("");
-
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
-}
-</script>
-
 <template>
-  <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
+  <div class="dynamic-embed">
+    <button @click="loadRemoteDist" :disabled="loading">
+      {{ loading ? "加载中..." : "从远程加载 dist 并显示" }}
+    </button>
 
-    <div class="row">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
-    </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
-
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
-  </main>
+    <!-- 动态 iframe -->
+    <iframe
+      v-if="iframeSrc"
+      :src="iframeSrc"
+      style="width: 100%; height: 100vh; border: none; display: block"
+      allowfullscreen
+    ></iframe>
+  </div>
 </template>
 
-<style scoped>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-
-</style>
-<style>
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
-</style> -->
 <script setup>
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { ref } from "vue";
+import JSZip from "jszip";
+import {
+  exists,
+  mkdir,
+  writeFile,
+  remove,
+  BaseDirectory,
+} from "@tauri-apps/plugin-fs";
+import { join } from "@tauri-apps/api/path";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
-const openBaidu = async () => {
-  const webview = new WebviewWindow("baidu-window", {
-    url: "https://www.baidu.com", // 直接加载远程页面
-    title: "test webview",
-    width: 1400,
-    height: 1000,
-    resizable: true,
-  });
-  await webview.show();
-};
+const iframeSrc = ref("");
+const loading = ref(false);
+
+const TARGET_FOLDER = "dynamic-dist"; // 目标文件夹名（相对 AppData）
+
+async function loadRemoteDist() {
+  const remoteUrl = "http://localhost:8080/dist.zip"; // ← 改成你的远程 dist zip 地址
+
+  if (loading.value) return;
+  loading.value = true;
+  iframeSrc.value = ""; // 清空旧内容
+
+  try {
+    console.log("正在下载远程 dist...");
+
+    // 1. 下载 zip 文件
+    const response = await fetch(remoteUrl);
+    if (!response.ok)
+      throw new Error(`下载失败: ${response.status} ${response.statusText}`);
+
+    const zipBuffer = await response.arrayBuffer();
+
+    // 2. 解压
+    console.log("正在解压...");
+    const zip = await JSZip.loadAsync(zipBuffer);
+
+    // 3. 准备目标目录（使用 BaseDirectory.AppData）
+    if (await exists(TARGET_FOLDER, { baseDir: BaseDirectory.AppData })) {
+      console.log("清理旧目录...");
+      await remove(TARGET_FOLDER, {
+        baseDir: BaseDirectory.AppData,
+        recursive: true,
+      });
+    }
+
+    // 创建目标目录（recursive: true 自动创建父目录）
+    await mkdir(TARGET_FOLDER, {
+      baseDir: BaseDirectory.AppData,
+      recursive: true,
+    });
+
+    // 4. 逐个写入文件
+    console.log("正在写入文件...");
+    const writePromises = [];
+
+    zip.forEach((relativePath, zipEntry) => {
+      if (zipEntry.dir) return; // 跳过目录
+
+      writePromises.push(
+        (async () => {
+          const filePath = await join(TARGET_FOLDER, relativePath);
+
+          // 确保父目录存在
+          const parentDir = filePath.substring(0, filePath.lastIndexOf("/"));
+          if (parentDir) {
+            await mkdir(parentDir, {
+              baseDir: BaseDirectory.AppData,
+              recursive: true,
+            });
+          }
+
+          const content = await zipEntry.async("uint8array");
+          await writeFile(filePath, content, {
+            baseDir: BaseDirectory.AppData,
+          });
+        })()
+      );
+    });
+
+    await Promise.all(writePromises);
+
+    // 5. 生成 iframe 可安全加载的 URL
+    const indexHtmlPath = await join(TARGET_FOLDER, "index.html");
+    iframeSrc.value = convertFileSrc(indexHtmlPath);
+
+    console.log("远程 dist 加载成功！iframe src 已设置");
+  } catch (err) {
+    console.error("加载远程 dist 失败:", err);
+    alert(`加载失败: ${err.message || err}`);
+  } finally {
+    loading.value = false;
+  }
+}
 </script>
-
-<template>
-  <button @click="openBaidu">button</button>
-</template>
