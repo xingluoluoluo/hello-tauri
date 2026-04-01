@@ -37,8 +37,8 @@
       </nav>
 
       <div class="sidebar-footer">
-        <div class="status-dot" :class="{ online: !loading }"></div>
-        <span>{{ loading ? '同步中' : '已连接' }}</span>
+        <div class="status-dot" :class="{ online: !initializing && !loading }"></div>
+        <span>{{ initializing ? '初始化中' : (loading ? '同步中' : '已连接') }}</span>
       </div>
     </aside>
 
@@ -52,7 +52,11 @@
           <h1>{{ currentTab?.name || '加载中...' }}</h1>
         </div>
         <div class="header-right">
-          <div v-if="loading" class="loading-indicator">
+          <div v-if="initializing" class="loading-indicator">
+            <span class="loading-spinner"></span>
+            <span>初始化资源</span>
+          </div>
+          <div v-else-if="loading" class="loading-indicator">
             <span class="loading-spinner"></span>
             <span>加载中</span>
           </div>
@@ -65,7 +69,15 @@
 
       <!-- iframe 内容区 -->
       <div class="iframe-container">
-        <div v-if="!iframeSrc && !loading" class="placeholder">
+        <div v-if="initializing" class="loading-screen">
+          <div class="loader">
+            <div class="loader-bar"></div>
+            <div class="loader-bar"></div>
+            <div class="loader-bar"></div>
+          </div>
+          <p>正在初始化资源...</p>
+        </div>
+        <div v-else-if="!iframeSrc" class="placeholder">
           <div class="placeholder-content">
             <div class="placeholder-icon">
               <span></span>
@@ -74,14 +86,6 @@
             <p>等待资源加载</p>
             <span class="placeholder-hint">选择左侧应用开始</span>
           </div>
-        </div>
-        <div v-else-if="loading" class="loading-screen">
-          <div class="loader">
-            <div class="loader-bar"></div>
-            <div class="loader-bar"></div>
-            <div class="loader-bar"></div>
-          </div>
-          <p>正在获取资源...</p>
         </div>
         <iframe
           v-else-if="iframeSrc"
@@ -118,15 +122,23 @@ const tabs = ref([
 const activeTab = ref(null);
 const iframeSrc = ref("");
 const loading = ref(false);
+const initializing = ref(true);
+
+// 缓存每个 tab 的 iframeSrc
+const tabResourceCache = new Map();
 
 const currentTab = computed(() => {
   return tabs.value.find(tab => tab.id === activeTab.value);
 });
 
-// 切换 tab 并加载资源
-async function switchTab(tabId) {
+// 切换 tab（使用缓存，不重新请求远程资源）
+function switchTab(tabId) {
   activeTab.value = tabId;
-  await loadRemoteDist(tabId);
+
+  // 直接从缓存读取，不请求远程
+  if (tabResourceCache.has(tabId)) {
+    iframeSrc.value = tabResourceCache.get(tabId);
+  }
 }
 
 // 获取目标文件夹名
@@ -164,20 +176,16 @@ async function listAllFiles(folder) {
   return files;
 }
 
-// 加载远程资源（增量更新）
+// 加载远程资源（增量更新），返回 iframeSrc
 async function loadRemoteDist(tabId) {
   const tab = tabs.value.find(t => t.id === tabId);
-  if (!tab) return;
+  if (!tab) return "";
 
   const remoteUrl = `http://localhost:${tab.port}/dist.zip`;
   const TARGET_FOLDER = getTargetFolder(tab.port);
 
-  if (loading.value) return;
-  loading.value = true;
-  iframeSrc.value = "";
-
   try {
-    console.log(`正在从 ${remoteUrl} 下载...`);
+    console.log(`[${tab.name}] 正在从 ${remoteUrl} 下载...`);
 
     // 1. 下载 zip 文件
     const response = await fetch(remoteUrl);
@@ -187,11 +195,10 @@ async function loadRemoteDist(tabId) {
     const zipBuffer = await response.arrayBuffer();
 
     // 2. 解压
-    console.log("正在解压...");
+    console.log(`[${tab.name}] 正在解压...`);
     const zip = await JSZip.loadAsync(zipBuffer);
 
     // 3. 收集 zip 中的文件信息
-    const zipFiles = new Map(); // normalizedPath -> { content, isAssets }
     const zipFilePaths = new Set();
 
     zip.forEach((relativePath, zipEntry) => {
@@ -211,7 +218,7 @@ async function loadRemoteDist(tabId) {
 
     // 5. 如果目录存在，检查 index.html 和 assets 文件是否有变化
     if (targetExists) {
-      console.log("检测到已有目录，进行增量对比...");
+      console.log(`[${tab.name}] 检测到已有目录，进行增量对比...`);
 
       // 读取现有的 index.html 内容
       const indexRelativePath = await join(TARGET_FOLDER, "index.html");
@@ -219,7 +226,7 @@ async function loadRemoteDist(tabId) {
       try {
         existingIndexContent = await readTextFile(indexRelativePath, { baseDir: BaseDirectory.AppData });
       } catch (e) {
-        console.log("无法读取现有 index.html，需要完整更新");
+        console.log(`[${tab.name}] 无法读取现有 index.html，需要完整更新`);
         needsFullWrite = true;
       }
 
@@ -242,7 +249,7 @@ async function loadRemoteDist(tabId) {
         const newHash = await computeHash(new TextEncoder().encode(newIndexContent));
 
         if (existingHash !== newHash) {
-          console.log("index.html 内容有变化，需要更新");
+          console.log(`[${tab.name}] index.html 内容有变化，需要更新`);
           needsFullWrite = true;
         }
       }
@@ -273,7 +280,7 @@ async function loadRemoteDist(tabId) {
           [...newAssets].some(f => !existingAssets.has(f));
 
         if (assetsChanged) {
-          console.log("assets 文件有变化，需要更新");
+          console.log(`[${tab.name}] assets 文件有变化，需要更新`);
           needsFullWrite = true;
         }
       }
@@ -281,7 +288,7 @@ async function loadRemoteDist(tabId) {
 
     // 6. 根据对比结果决定更新策略
     if (needsFullWrite) {
-      console.log("执行增量更新...");
+      console.log(`[${tab.name}] 执行增量更新...`);
 
       // 确保目录存在
       await mkdir(TARGET_FOLDER, {
@@ -296,7 +303,7 @@ async function loadRemoteDist(tabId) {
       const filesToDelete = [...existingFiles].filter(f => !zipFilePaths.has(f));
 
       // 写入文件（只写入需要更新的）
-      console.log("正在写入文件...");
+      console.log(`[${tab.name}] 正在写入文件...`);
       const writePromises = [];
 
       for (const normalizedPath of zipFilePaths) {
@@ -329,23 +336,23 @@ async function loadRemoteDist(tabId) {
       for (const file of filesToDelete) {
         try {
           await remove(await join(TARGET_FOLDER, file), { baseDir: BaseDirectory.AppData });
-          console.log(`删除旧文件: ${file}`);
+          console.log(`[${tab.name}] 删除旧文件: ${file}`);
         } catch (e) {
-          console.warn(`删除文件失败: ${file}`, e);
+          console.warn(`[${tab.name}] 删除文件失败: ${file}`, e);
         }
       }
     } else {
-      console.log("文件无变化，跳过文件写入");
+      console.log(`[${tab.name}] 文件无变化，跳过文件写入`);
     }
 
-    console.log("开始处理 index.html...");
+    console.log(`[${tab.name}] 开始处理 index.html...`);
 
     const appData = await appDataDir();
     const indexRelativePath = await join(TARGET_FOLDER, "index.html");
     const indexFullPath = await join(appData, TARGET_FOLDER, "index.html");
 
     const indexExists = await exists(indexRelativePath, { baseDir: BaseDirectory.AppData });
-    console.log("index.html 是否存在:", indexExists);
+    console.log(`[${tab.name}] index.html 是否存在:`, indexExists);
 
     if (!indexExists) {
       throw new Error("index.html 不存在，请检查 zip 包结构");
@@ -385,25 +392,49 @@ async function loadRemoteDist(tabId) {
       { baseDir: BaseDirectory.AppData }
     );
 
-    console.log("已注入 <base> 并修复资源路径，baseHref =", baseHref);
+    console.log(`[${tab.name}] 已注入 <base> 并修复资源路径`);
 
-    // 设置 iframe src
-    iframeSrc.value = convertFileSrc(indexFullPath);
-
-    console.log("远程 dist 加载成功！iframe src:", iframeSrc.value);
+    // 返回 iframe src
+    const src = convertFileSrc(indexFullPath);
+    console.log(`[${tab.name}] 远程 dist 加载成功！`);
+    return src;
   } catch (err) {
-    console.error("加载远程 dist 失败:", err);
-    alert(`加载失败: ${err.message || err}`);
+    console.error(`[${tab.name}] 加载远程 dist 失败:`, err);
+    throw err;
+  }
+}
+
+// 初始化时加载所有远程资源
+async function initializeResources() {
+  initializing.value = true;
+  loading.value = true;
+
+  try {
+    // 并行加载所有 tab 的资源
+    await Promise.all(
+      tabs.value.map(async (tab) => {
+        const src = await loadRemoteDist(tab.id);
+        tabResourceCache.set(tab.id, src);
+      })
+    );
+
+    // 设置默认选中的 tab
+    if (tabs.value.length > 0) {
+      activeTab.value = tabs.value[0].id;
+      iframeSrc.value = tabResourceCache.get(tabs.value[0].id);
+    }
+  } catch (err) {
+    console.error("初始化资源失败:", err);
+    alert(`初始化失败: ${err.message || err}`);
   } finally {
+    initializing.value = false;
     loading.value = false;
   }
 }
 
-// 初始化时默认选中第一个并加载
+// 初始化
 onMounted(() => {
-  if (tabs.value.length > 0) {
-    switchTab(tabs.value[0].id);
-  }
+  initializeResources();
 });
 </script>
 
