@@ -18,8 +18,8 @@
       }
     ],
     "security": {
-      "assetProtocol": { "enable": true, "scope": ["$APPDATA/**", "$TEMP/**"] },
-      "csp": "default-src 'self' tauri: asset: http://asset.localhost; frame-src 'self' tauri: asset: http://asset.localhost;"
+      "assetProtocol": { "enable": true, "scope": ["C:\\Users\\**", "$APPDATA/**", "$APPDATA", "$TEMP/**", "**/*", "$APPDATA/dynamic-dist/**"] },
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://asset.localhost; style-src 'self' 'unsafe-inline' http://asset.localhost; connect-src 'self'; frame-src 'self' http://asset.localhost;"
     }
   },
   "bundle": {
