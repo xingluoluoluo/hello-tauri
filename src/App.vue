@@ -103,6 +103,7 @@ import {
   writeFile,
   remove,
   readTextFile,
+  readDir,
   BaseDirectory
 } from "@tauri-apps/plugin-fs";
 import { join, dirname, appDataDir } from "@tauri-apps/api/path";
@@ -133,7 +134,37 @@ function getTargetFolder(port) {
   return `dynamic-dist-${port}`;
 }
 
-// 加载远程资源
+// 计算内容的 hash
+async function computeHash(buffer) {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 获取目录下所有文件的相对路径
+async function listAllFiles(folder) {
+  const files = new Set();
+
+  async function scan(dir, prefix = '') {
+    try {
+      const entries = await readDir(dir, { baseDir: BaseDirectory.AppData });
+      for (const entry of entries) {
+        const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.children) {
+          await scan(await join(folder, path), path);
+        } else {
+          files.add(path);
+        }
+      }
+    } catch (e) {
+      // 目录不存在或读取失败
+    }
+  }
+
+  await scan(folder);
+  return files;
+}
+
+// 加载远程资源（增量更新）
 async function loadRemoteDist(tabId) {
   const tab = tabs.value.find(t => t.id === tabId);
   if (!tab) return;
@@ -159,23 +190,9 @@ async function loadRemoteDist(tabId) {
     console.log("正在解压...");
     const zip = await JSZip.loadAsync(zipBuffer);
 
-    // 3. 准备目标目录
-    if (await exists(TARGET_FOLDER, { baseDir: BaseDirectory.AppData })) {
-      console.log("清理旧目录...");
-      await remove(TARGET_FOLDER, {
-        baseDir: BaseDirectory.AppData,
-        recursive: true,
-      });
-    }
-
-    await mkdir(TARGET_FOLDER, {
-      baseDir: BaseDirectory.AppData,
-      recursive: true,
-    });
-
-    // 4. 逐个写入文件
-    console.log("正在写入文件...");
-    const writePromises = [];
+    // 3. 收集 zip 中的文件信息
+    const zipFiles = new Map(); // normalizedPath -> { content, isAssets }
+    const zipFilePaths = new Set();
 
     zip.forEach((relativePath, zipEntry) => {
       if (zipEntry.dir) return;
@@ -185,29 +202,143 @@ async function loadRemoteDist(tabId) {
         normalizedPath = normalizedPath.substring(5);
       }
 
-      writePromises.push(
-        (async () => {
-          const filePath = await join(TARGET_FOLDER, normalizedPath);
-
-          const parentDir = await dirname(filePath);
-          if (parentDir && parentDir !== ".") {
-            await mkdir(parentDir, {
-              baseDir: BaseDirectory.AppData,
-              recursive: true,
-            });
-          }
-
-          const content = await zipEntry.async("uint8array");
-          await writeFile(filePath, content, {
-            baseDir: BaseDirectory.AppData,
-          });
-        })()
-      );
+      zipFilePaths.add(normalizedPath);
     });
 
-    await Promise.all(writePromises);
+    // 4. 检查目标目录是否存在
+    const targetExists = await exists(TARGET_FOLDER, { baseDir: BaseDirectory.AppData });
+    let needsFullWrite = !targetExists;
 
-    console.log("文件写入完成，开始处理 index.html...");
+    // 5. 如果目录存在，检查 index.html 和 assets 文件是否有变化
+    if (targetExists) {
+      console.log("检测到已有目录，进行增量对比...");
+
+      // 读取现有的 index.html 内容
+      const indexRelativePath = await join(TARGET_FOLDER, "index.html");
+      let existingIndexContent = null;
+      try {
+        existingIndexContent = await readTextFile(indexRelativePath, { baseDir: BaseDirectory.AppData });
+      } catch (e) {
+        console.log("无法读取现有 index.html，需要完整更新");
+        needsFullWrite = true;
+      }
+
+      // 从 zip 中获取新的 index.html 内容（未修改的原始内容）
+      const zipIndexEntry = zip.file("dist/index.html") || zip.file("index.html");
+      if (!zipIndexEntry) {
+        throw new Error("zip 包中找不到 index.html");
+      }
+      const newIndexContent = await zipIndexEntry.async("text");
+
+      // 对比 index.html 原始内容
+      if (!needsFullWrite && existingIndexContent) {
+        // 从现有 index.html 中提取原始内容（移除 base href 和路径修改）
+        let existingOriginal = existingIndexContent
+          .replace(/<base href="[^"]*">\n?/i, '')
+          .replace(/\.\//g, '/');
+
+        // 计算内容 hash 对比
+        const existingHash = await computeHash(new TextEncoder().encode(existingOriginal));
+        const newHash = await computeHash(new TextEncoder().encode(newIndexContent));
+
+        if (existingHash !== newHash) {
+          console.log("index.html 内容有变化，需要更新");
+          needsFullWrite = true;
+        }
+      }
+
+      // 检查 assets 文件是否变化（通过文件名对比）
+      if (!needsFullWrite) {
+        const existingFiles = await listAllFiles(TARGET_FOLDER);
+
+        // 检查 assets 目录下的文件
+        const existingAssets = new Set();
+        const newAssets = new Set();
+
+        for (const file of existingFiles) {
+          if (file.startsWith('assets/')) {
+            existingAssets.add(file);
+          }
+        }
+
+        for (const file of zipFilePaths) {
+          if (file.startsWith('assets/')) {
+            newAssets.add(file);
+          }
+        }
+
+        // 对比 assets 文件集合
+        const assetsChanged = existingAssets.size !== newAssets.size ||
+          [...existingAssets].some(f => !newAssets.has(f)) ||
+          [...newAssets].some(f => !existingAssets.has(f));
+
+        if (assetsChanged) {
+          console.log("assets 文件有变化，需要更新");
+          needsFullWrite = true;
+        }
+      }
+    }
+
+    // 6. 根据对比结果决定更新策略
+    if (needsFullWrite) {
+      console.log("执行增量更新...");
+
+      // 确保目录存在
+      await mkdir(TARGET_FOLDER, {
+        baseDir: BaseDirectory.AppData,
+        recursive: true,
+      });
+
+      // 获取现有文件列表
+      const existingFiles = targetExists ? await listAllFiles(TARGET_FOLDER) : new Set();
+
+      // 找出需要删除的文件（在新 zip 中不存在）
+      const filesToDelete = [...existingFiles].filter(f => !zipFilePaths.has(f));
+
+      // 写入文件（只写入需要更新的）
+      console.log("正在写入文件...");
+      const writePromises = [];
+
+      for (const normalizedPath of zipFilePaths) {
+        const zipEntry = zip.file(`dist/${normalizedPath}`) || zip.file(normalizedPath);
+        if (!zipEntry) continue;
+
+        writePromises.push(
+          (async () => {
+            const filePath = await join(TARGET_FOLDER, normalizedPath);
+
+            const parentDir = await dirname(filePath);
+            if (parentDir && parentDir !== ".") {
+              await mkdir(parentDir, {
+                baseDir: BaseDirectory.AppData,
+                recursive: true,
+              });
+            }
+
+            const content = await zipEntry.async("uint8array");
+            await writeFile(filePath, content, {
+              baseDir: BaseDirectory.AppData,
+            });
+          })()
+        );
+      }
+
+      await Promise.all(writePromises);
+
+      // 删除不再需要的文件
+      for (const file of filesToDelete) {
+        try {
+          await remove(await join(TARGET_FOLDER, file), { baseDir: BaseDirectory.AppData });
+          console.log(`删除旧文件: ${file}`);
+        } catch (e) {
+          console.warn(`删除文件失败: ${file}`, e);
+        }
+      }
+    } else {
+      console.log("文件无变化，跳过文件写入");
+    }
+
+    console.log("开始处理 index.html...");
 
     const appData = await appDataDir();
     const indexRelativePath = await join(TARGET_FOLDER, "index.html");
